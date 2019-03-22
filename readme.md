@@ -337,15 +337,33 @@ gdb-peda$ x /64wx 0x555555757060
 ## getshell
 泄露出libc基址意味着libc.so里面所有的东西都知道在哪里了，这里就需要找到一个执行任意命令的地方了
 ### __malloc_hook
-malloc执行的时候会去读取__malloc_hook这个地方的值，然后判断是否为空，如果不为空就执行这个__malloc_hook，而__malloc_hook可以通过伪造fastbin链，去写__malloc_hook这个地方的值
+malloc执行的时候会去读取__malloc_hook这个地方的值，然后判断是否为空，如果不为空就执行这个__malloc_hook，而__malloc_hook可以通过伪造fastbin链，去写__malloc_hook这个地方的值。__malloc_hook的地址在main_arena-0x10的地方
 ```
 void *(*hook) (size_t, const void *)
-   = atomic_forced_read (__malloc_hook);
- if (__builtin_expect (hook != NULL, 0))
-   return (*hook)(bytes, RETURN_ADDRESS (0));
+    = atomic_forced_read (__malloc_hook);
+if (__builtin_expect (hook != NULL, 0))
+    return (*hook)(bytes, RETURN_ADDRESS (0));
 ```
-
-
+如果要写malloc,必须想办法在__malloc_hook附近根据现有条件伪造一个fastbin，这个时候观察
+```
+gdb-peda$ x /64wx (long long)&main_arena -0x50
+0x7ffff7bcbad0 <_IO_wide_data_0+272>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbae0 <_IO_wide_data_0+288>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbaf0 <_IO_wide_data_0+304>:	0xf7bca260	0x00007fff	0x00000000	0x00000000
+0x7ffff7bcbb00 <__memalign_hook>:	0xf788ce20	0x00007fff	0xf788ca00	0x00007fff
+0x7ffff7bcbb10 <__malloc_hook>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb20 <main_arena>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb30 <main_arena+16>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb40 <main_arena+32>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb50 <main_arena+48>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb60 <main_arena+64>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb70 <main_arena+80>:	0x00000000	0x00000000	0x55762340	0x00005555
+0x7ffff7bcbb80 <main_arena+96>:	0x557571d0	0x00005555	0x557570c0	0x00005555
+0x7ffff7bcbb90 <main_arena+112>:	0x557570c0	0x00005555	0xf7bcbb88	0x00007fff
+0x7ffff7bcbba0 <main_arena+128>:	0xf7bcbb88	0x00007fff	0xf7bcbb98	0x00007fff
+0x7ffff7bcbbb0 <main_arena+144>:	0xf7bcbb98	0x00007fff	0xf7bcbba8	0x00007fff
+0x7ffff7bcbbc0 <main_arena+160>:	0xf7bcbba8	0x00007fff	0xf7bcbbb8	0x00007fff
+```
 
 
 
