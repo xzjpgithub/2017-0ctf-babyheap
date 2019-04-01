@@ -436,7 +436,7 @@ gdb-peda$ x /64wx (long long)&main_arena -0x50
 ```
 
 # 参考的各个师傅的blog，感谢各位师傅
-gd师傅（链表指向泄露libc）：https://bbs.pediy.com/thread-223461.htm
-Anciety师傅（包含泄露libc）：https://blog.csdn.net/qq_29343201/article/details/66476135
-dangokyo师傅（malloc&&free解读，包括安全机制）https://dangokyo.me/2017/12/12/introduction-on-ptmalloc-part-2/
+gd师傅（链表指向泄露libc）：https://bbs.pediy.com/thread-223461.htm<br>
+Anciety师傅（包含泄露libc）：https://blog.csdn.net/qq_29343201/article/details/66476135<br>
+dangokyo师傅（malloc&&free解读，包括安全机制）https://dangokyo.me/2017/12/12/introduction-on-ptmalloc-part-2/<br>
 
